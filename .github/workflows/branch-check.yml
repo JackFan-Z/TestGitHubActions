@@ -4,6 +4,11 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
 
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write
+
 jobs:
   check-branch-base:
     runs-on: ubuntu-latest
@@ -51,31 +56,16 @@ jobs:
             fi
           fi
 
-      - name: Create check result
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const result = '${{ steps.branch-check.outputs.result }}';
-            const message = '${{ steps.branch-check.outputs.message }}';
-            
-            // Create a check run with the result
-            const checkRun = await github.rest.checks.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              name: 'Branch Base Check',
-              head_sha: context.payload.pull_request.head.sha,
-              status: 'completed',
-              conclusion: result === 'success' ? 'success' : 'neutral',
-              output: {
-                title: result === 'success' ? 'Branch is properly based' : 'Branch base warning',
-                summary: message,
-                text: result === 'success' 
-                  ? 'The source branch is based on the target branch.' 
-                  : 'The source branch is not based on the target branch. Consider rebasing your branch to include the latest changes from the target branch.'
-              }
-            });
-            
-            console.log('Check run created:', checkRun.data.html_url);
+      - name: Set workflow status
+        id: set-status
+        run: |
+          if [ "${{ steps.branch-check.outputs.result }}" = "success" ]; then
+            echo "✅ Branch check passed"
+            echo "status=success" >> $GITHUB_OUTPUT
+          else
+            echo "⚠️ Branch check warning (not an error)"
+            echo "status=warning" >> $GITHUB_OUTPUT
+          fi
 
       - name: Add PR comment on warning
         if: steps.branch-check.outputs.result == 'warning'
