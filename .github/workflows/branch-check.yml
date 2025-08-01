@@ -1,0 +1,105 @@
+name: Branch Base Check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  check-branch-base:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check if source branch is based on target branch
+        id: branch-check
+        run: |
+          # Get the target branch (base) and source branch (head)
+          TARGET_BRANCH="${{ github.event.pull_request.base.ref }}"
+          SOURCE_BRANCH="${{ github.event.pull_request.head.ref }}"
+          
+          echo "Target branch: $TARGET_BRANCH"
+          echo "Source branch: $SOURCE_BRANCH"
+          
+          # Fetch all branches
+          git fetch origin
+          
+          # Check if source branch contains the target branch
+          # This means the source branch is based on (or ahead of) the target branch
+          if git merge-base --is-ancestor "origin/$TARGET_BRANCH" "origin/$SOURCE_BRANCH"; then
+            echo "✅ Source branch '$SOURCE_BRANCH' is based on target branch '$TARGET_BRANCH'"
+            echo "result=success" >> $GITHUB_OUTPUT
+            echo "message=Source branch is properly based on target branch" >> $GITHUB_OUTPUT
+          else
+            echo "⚠️  WARNING: Source branch '$SOURCE_BRANCH' is NOT based on target branch '$TARGET_BRANCH'"
+            echo "result=warning" >> $GITHUB_OUTPUT
+            echo "message=Source branch is not based on target branch - consider rebasing" >> $GITHUB_OUTPUT
+            
+            # Show the divergence information
+            echo ""
+            echo "Branch divergence information:"
+            MERGE_BASE=$(git merge-base "origin/$TARGET_BRANCH" "origin/$SOURCE_BRANCH" 2>/dev/null || echo "No common ancestor found")
+            echo "Common ancestor: $MERGE_BASE"
+            
+            if [ "$MERGE_BASE" != "No common ancestor found" ]; then
+              COMMITS_BEHIND=$(git rev-list --count "$MERGE_BASE..origin/$TARGET_BRANCH" 2>/dev/null || echo "0")
+              COMMITS_AHEAD=$(git rev-list --count "$MERGE_BASE..origin/$SOURCE_BRANCH" 2>/dev/null || echo "0")
+              echo "Target branch is $COMMITS_BEHIND commit(s) ahead of common ancestor"
+              echo "Source branch is $COMMITS_AHEAD commit(s) ahead of common ancestor"
+            fi
+          fi
+
+      - name: Create check result
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const result = '${{ steps.branch-check.outputs.result }}';
+            const message = '${{ steps.branch-check.outputs.message }}';
+            
+            // Create a check run with the result
+            const checkRun = await github.rest.checks.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              name: 'Branch Base Check',
+              head_sha: context.payload.pull_request.head.sha,
+              status: 'completed',
+              conclusion: result === 'success' ? 'success' : 'neutral',
+              output: {
+                title: result === 'success' ? 'Branch is properly based' : 'Branch base warning',
+                summary: message,
+                text: result === 'success' 
+                  ? 'The source branch is based on the target branch.' 
+                  : 'The source branch is not based on the target branch. Consider rebasing your branch to include the latest changes from the target branch.'
+              }
+            });
+            
+            console.log('Check run created:', checkRun.data.html_url);
+
+      - name: Add PR comment on warning
+        if: steps.branch-check.outputs.result == 'warning'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const message = `⚠️ **Branch Base Warning**
+            
+            The source branch \`${{ github.event.pull_request.head.ref }}\` does not appear to be based on the target branch \`${{ github.event.pull_request.base.ref }}\`.
+            
+            **Recommendation:** Consider rebasing your branch to include the latest changes from the target branch:
+            
+            \`\`\`bash
+            git checkout ${{ github.event.pull_request.head.ref }}
+            git fetch origin
+            git rebase origin/${{ github.event.pull_request.base.ref }}
+            git push --force-with-lease
+            \`\`\`
+            
+            This will help ensure your changes are compatible with the latest target branch and reduce potential merge conflicts.`;
+            
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: message
+            });
